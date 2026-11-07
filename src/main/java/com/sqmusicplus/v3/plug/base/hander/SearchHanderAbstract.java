@@ -62,22 +62,6 @@ public abstract class SearchHanderAbstract implements SearchHander, Serializable
         return downloadInfoService;
     }
 
-    /**
-     * 是否下载歌曲封面（专辑图 / 歌手图）。
-     * 默认 true；在 docker-compose 里设置环境变量 DOWNLOAD_COVER=false 即可关闭。
-     */
-    public static boolean isDownloadCover() {
-        return !"false".equalsIgnoreCase(String.valueOf(System.getenv().getOrDefault("DOWNLOAD_COVER", "true")).trim());
-    }
-
-    /**
-     * 是否下载歌词（.lrc 文件与内嵌歌词）。
-     * 默认 true；在 docker-compose 里设置环境变量 DOWNLOAD_LYRIC=false 即可关闭。
-     */
-    public static boolean isDownloadLyric() {
-        return !"false".equalsIgnoreCase(String.valueOf(System.getenv().getOrDefault("DOWNLOAD_LYRIC", "true")).trim());
-    }
-
 
 
     @Override
@@ -446,18 +430,6 @@ public abstract class SearchHanderAbstract implements SearchHander, Serializable
      * @param baseMusicArtistName
      */
     private void saveAlbumImageAndTag(Album album,DownloadInfo downloadInfo, SearchHander searchHander, File onComplete, String albumImagePath, String baseAlbumID, boolean isAudioBook, String baseMusicAlbumName, File artistsImageFile, Music music, AtomicBoolean aliDriveSync, AtomicReference<Exception> downloadException, CountDownLatch downloadLatch, String baseMusicName, String baseMusicArtistName,String albumYear) {
-        if (!isDownloadCover()) {
-            // 不下载专辑/歌手封面，直接进入标签与落盘；必须 countDown 否则会 5 分钟超时
-            try {
-                extracted(music, onComplete, null, downloadInfo, aliDriveSync, albumYear);
-            } catch (Exception ex) {
-                log.error("后续处理失败: {}", ex.getMessage(), ex);
-                downloadException.set(ex);
-            } finally {
-                downloadLatch.countDown();
-            }
-            return;
-        }
         if(StringUtils.isNotEmpty(albumImagePath)){
             //专辑图片
             String albumImg = album.getAlbumImg();
@@ -653,9 +625,6 @@ public abstract class SearchHanderAbstract implements SearchHander, Serializable
      */
     @Nullable
     private File saveArtisImage(DownloadInfo downloadInfo, SearchHander searchHander, String artistImagePath, List<String> baseArtistsID, boolean isAudioBook, Music music, AtomicBoolean aliDriveSync, String baseMusicName, String baseMusicArtistName, String baseMusicAlbumName) {
-        if (!isDownloadCover()) {
-            return null;
-        }
         //歌手图片文件
         File artistsImageFile;
         if(StringUtils.isNotEmpty(artistImagePath)){
@@ -843,7 +812,7 @@ public abstract class SearchHanderAbstract implements SearchHander, Serializable
         Integer rewriteMp3tag = downloadInfo.getRewriteMp3tag();
         //创建歌词
         try {
-            if (isDownloadLyric() && StringUtils.isNotEmpty(music.getMusicLyric())) {
+            if (StringUtils.isNotEmpty(music.getMusicLyric())) {
                 String name = FileUtil.getPrefix(onSuccess);
                 String lrcPath = onSuccess.getParentFile() + File.separator + name + ".lrc";
                 log.debug("lrc地址{}", lrcPath);
@@ -926,7 +895,7 @@ public abstract class SearchHanderAbstract implements SearchHander, Serializable
                 } catch (Exception e) {
                     musicArtistsStr="";
                 }
-                MusicUtils.setMediaFileInfo(onSuccess, music.getMusicName(), music.getMusicAlbum(),musicArtistsStr , "", (isDownloadLyric() ? music.getMusicLyric() : ""), albumfile,music.getMusicArtists().get(0),albumYear,music.getCd(),music.getTrack(),tagsStr);
+                MusicUtils.setMediaFileInfo(onSuccess, music.getMusicName(), music.getMusicAlbum(),musicArtistsStr , "", music.getMusicLyric(), albumfile,music.getMusicArtists().get(0),albumYear,music.getCd(),music.getTrack(),tagsStr);
                 log.info("标签写入成功{}", music.getMusicName());
             }
         } catch (Exception e) {
