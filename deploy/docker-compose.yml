@@ -1,0 +1,188 @@
+# ==============================================================================
+# simple_sq_music_plus  ——  群晖 DSM 7.2 Container Manager / docker compose v2
+# ------------------------------------------------------------------------------
+# 部署方式（二选一）：
+#   A. Container Manager -> 项目 -> 新增 -> 选择「上传 docker-compose.yml」
+#      项目路径建议：/volume1/docker/sqmusic
+#   B. SSH：mkdir -p /volume1/docker/sqmusic && cd /volume1/docker/sqmusic
+#          docker compose up -d
+#
+# 部署完成后访问：http://群晖IP:8096        默认账号 admin / 密码 admin
+# 共 4 个容器：MySQL / 后端 / 前端 / 酷狗API。镜像合计约 2GB（后端 1.4GB），首次拉取需要几分钟。
+# ------------------------------------------------------------------------------
+# 部署前只需要改两个地方（下面标了 ★）：
+#   ★1 音乐目录  /volume1/music  -> 你自己的音乐共享文件夹
+#   ★2 对外端口  8096            -> 与 Jellyfin 等冲突时换一个
+# ==============================================================================
+
+services:
+
+  # ------------------------------- MySQL 5.7 -------------------------------
+  mysql:
+    # ⚠ mysql:5.7 官方镜像只有 x86_64(amd64)。
+    #   如果你的群晖是 ARM 机型（如 DS223 / DS423 / DS124 / DS220j），
+    #   把下面这行换成：  image: mariadb:10.11
+    image: mysql:5.7
+    container_name: sqmusic_mysql
+    restart: always
+    command:
+      # 建库用 utf8mb4，避免歌名/歌词中文乱码（表结构本身已声明 utf8）
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+      # 注意：不要改 MySQL 时区！后端 JDBC 固定用 serverTimezone=UTC，
+      # 改了会让下载记录、日志时间整体偏移 8 小时。
+    environment:
+      MYSQL_ROOT_PASSWORD: sqmusicv3password
+      MYSQL_DATABASE: sqmusicv3
+      MYSQL_ROOT_HOST: "%"          # 允许后端容器用 root 远程连接
+    volumes:
+      # 用「命名卷」而不是 ./mysql_data（绑定目录）：
+      # 群晖上绑定目录里一旦出现 @eaDir、残留的 ib_logfile 等文件，MySQL 就会报
+      # "--initialize specified but the data directory has files in it. Aborting"
+      # 然后每 10 秒重启一次。命名卷由 Docker 独占管理，不会被群晖塞进别的文件。
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      # 用 exec 形式、不带密码：mysqladmin ping 只要服务器能连上就返回 0
+      #（Access denied 也算活着），不依赖 shell 变量展开，不会被误判。
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+    networks:
+      sq-app-network:
+        ipv4_address: 172.30.99.2
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --------------------------- 后端 Spring Boot ---------------------------
+  sqmusic_main:
+    # 自建镜像：官方 v3.1.34 + 两个下载开关（源码 fork：github.com/masterdavidz/simple_sq_music_plus）
+    # 仅 amd64（GitHub runner 构建）。
+    #
+    # ① 阿里云 ACR 个人版实例（国内快，推荐）。仓库为私有，NAS 上需先 docker login：
+    #      docker login crpi-x0rt30yit4wrxixn.cn-beijing.personal.cr.aliyuncs.com -u <阿里云账号>
+    image: crpi-x0rt30yit4wrxixn.cn-beijing.personal.cr.aliyuncs.com/sq_music/simple_sq_music_plus:music-only
+    # ② 没有 ACR 时用这行（ghcr 公开镜像，已验证可匿名拉取，但国内可能慢）
+    # image: ghcr.io/masterdavidz/simple_sq_music_plus:music-only
+    # ★ 容器名必须保持 sqmusic_main：前端 nginx 的 upstream 里写死了这个主机名，
+    #   改名会导致页面打开但接口全部 502。
+    container_name: sqmusic_main
+    restart: always
+    # 只保证「先创建 mysql 再创建后端」，不等健康检查。
+    # 原因：数据库首次初始化在机械盘上可能超过 3 分钟，硬等健康检查会让整个项目
+    # 以 "dependency failed to start" 直接失败；后端连不上会自动重启，等库好了自己连上。
+    depends_on:
+      - mysql
+    environment:
+      DB_IP: mysql
+      DB_PORT: "3306"
+      DB_NAME: sqmusicv3
+      DB_USERNAME: root
+      DB_PASSWORD: sqmusicv3password
+      # 只下载音频：不下载封面（专辑图/歌手图）、不下载歌词（.lrc 与内嵌歌词）
+      # 想恢复官方行为，把这两行删掉或改成 "true"
+      DOWNLOAD_COVER: "false"
+      DOWNLOAD_LYRIC: "false"
+    # 不依赖 Docker DNS：直接把数据库容器名写进 /etc/hosts。
+    # 群晖上若 dockerd.json 里配了 dns，容器名会解析失败（返回局域网 IP 后超时）。
+    extra_hosts:
+      - "mysql:172.30.99.2"
+    # ★ 显式指定 DNS：NAS 的 /etc/resolv.conf 若指向 127.0.0.1（本机 DNS/代理），
+    # 容器转发过去必然超时，导致搜歌、封面、下载全部失败（UnknownHostException）。
+    dns:
+      - 223.5.5.5
+      - 119.29.29.29
+    volumes:
+      # ★1 左边改成你自己的音乐目录（绝对路径）。
+      #    建议指向 Emby / Jellyfin / Audio Station 正在用的那个音乐共享文件夹。
+      - /volume1/music/SQ_Music_Down:/music
+    networks:
+      sq-app-network:
+        ipv4_address: 172.30.99.3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ------------------------------ 前端 Nginx ------------------------------
+  sqmusic_web:
+    image: registry.cn-hangzhou.aliyuncs.com/sqdockler/simple_sq_music_plus_web:v3.1.5
+    container_name: sqmusic_web
+    restart: always
+    depends_on:
+      - sqmusic_main
+    ports:
+      # ★2 左边是群晖本机端口（可改），右边 80 是容器内 nginx 端口（不要改）
+      - "8096:80"
+    # nginx 的 upstream 是 sqmusic_main，同样写死，避免解析不到导致容器起不来
+    extra_hosts:
+      - "sqmusic_main:172.30.99.3"
+    networks:
+      sq-app-network:
+        ipv4_address: 172.30.99.4
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ------------------------- 可选：酷狗概念版 API -------------------------
+  # 带这个容器 + 设置里开启酷狗插件，下载源就多一个「酷狗」。
+  # 注意：该镜像只有 amd64（群晖 x86 可用），ARM 机型请自行构建。
+  kugoumusicapi:
+    # 自建：上游 MakcRe/KuGouMusicApi（1.6.x）由 GitHub Actions 构建，比官方 1.5.1 新
+    image: crpi-x0rt30yit4wrxixn.cn-beijing.personal.cr.aliyuncs.com/sq_music/kugou_api:latest
+    # 回退用（旧版，扫码不可用但 cookie 登录可用）：
+    # image: registry.cn-hangzhou.aliyuncs.com/sqdockler/kugoumusicapi:1.5.1
+    container_name: sqmusic_kugou_api
+    restart: always
+    environment:
+      # 概念版：官方 README 里是 .env 的 platform=lite，这里用同名小写环境变量
+      platform: lite
+      PLATFORM: lite        # 兼容旧版本
+      PORT: "3000"
+      TZ: Asia/Shanghai
+    networks:
+      sq-app-network:
+        ipv4_address: 172.30.99.5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # -------------------------------------------------------------------------
+  # 可选：网易云 API（不用自带公共接口、想本地跑一个时再打开）
+  # 打开后到网页「设置」里把网易云 baseUrl 填 http://sqmusic_netease_api:3000
+  # -------------------------------------------------------------------------
+  # neteasecloudmusicapi:
+  #   image: registry.cn-hangzhou.aliyuncs.com/sqdockler/netease_cloud_music_api:v4.32.0
+  #   container_name: sqmusic_netease_api
+  #   restart: always
+  #   networks:
+  #     - sq-app-network
+
+networks:
+  sq-app-network:
+    # 固定网络名：以后即使把项目目录改名，也不会重建网络（项目名默认取目录名）
+    name: sqmusic_net
+    driver: bridge
+    ipam:
+      config:
+        # 固定网段，才能给容器固定 IP。若报 "Pool overlaps with other one"，
+        # 把 172.30.99.0/24 换成别的空闲网段（三个 IP 同步改）。
+        - subnet: 172.30.99.0/24
+
+# 数据库数据卷（名称已固定）。真实位置：/volume1/@docker/volumes/sqmusic_mysql_data/_data
+# 想改回看得见的目录，就把上面 mysql 的 volumes 换回：
+#   - /volume1/docker/sqmusic/mysql_data:/var/lib/mysql
+# 注意：那个目录必须是空的，且不要再往里放任何文件。
+volumes:
+  mysql_data:
+    # 固定卷名，避免改目录名后 Docker 认为是新项目、新建一个空库
+    name: sqmusic_mysql_data
