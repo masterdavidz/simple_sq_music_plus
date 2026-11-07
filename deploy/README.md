@@ -46,3 +46,44 @@ crpi-x0rt30yit4wrxixn.cn-beijing.personal.cr.aliyuncs.com/sq_music/simple_sq_mus
 ```
 
 源码 fork：https://github.com/masterdavidz/simple_sq_music_plus （`SearchHanderAbstract.java` 中实现了两个开关）
+
+## 上游更新后怎么出新镜像（无需同步 fork）
+
+补丁放在仓库的 `patches/music-only.patch`，CI 每次都会**直接检出上游源码 + 打补丁**再构建，
+所以上游发版后不需要 Sync fork，也不会产生合并冲突。
+
+三种触发方式：
+
+| 方式 | 操作 | 说明 |
+|---|---|---|
+| 手动 | Actions → `build-music-only` → Run workflow | 想马上用新版就点这个 |
+| 自动 | 每周一 02:00（北京时间） | 定时检查上游 HEAD 并重建 |
+| 改补丁 | push 到 `3.0` 分支的 `patches/**` | 修完补丁自动验证 |
+
+产物（每次都会推两份）：
+
+```
+crpi-x0rt30yit4wrxixn.cn-beijing.personal.cr.aliyuncs.com/sq_music/simple_sq_music_plus:music-only
+crpi-x0rt30yit4wrxixn.cn-beijing.personal.cr.aliyuncs.com/sq_music/simple_sq_music_plus:music-only-<上游版本号>
+ghcr.io/masterdavidz/simple_sq_music_plus:music-only
+```
+
+NAS 上跟最新：
+
+```bash
+docker compose pull sqmusic_main
+docker compose up -d --force-recreate sqmusic_main
+```
+
+想钉版本就把 compose 里的 tag 换成 `music-only-3.1.34` 这种带版本号的。
+
+## 补丁打不上怎么办
+
+上游如果改动了补丁涉及的那几行，CI 会在「应用补丁」这步失败（`git apply` 报错），
+镜像不会产出，也不会污染现有 tag。把失败日志给维护者，改 `patches/music-only.patch` 即可，
+**不需要动源码**。
+
+补丁内容包含两处改动：
+
+1. `SearchHanderAbstract.java`：新增 `DOWNLOAD_COVER` / `DOWNLOAD_LYRIC` 两个环境变量开关；
+2. `QQSearchEntity.java`：`genre_info` 空值保护（上游接口缺字段导致下载 NPE）。
