@@ -1,0 +1,75 @@
+name: build-music-only
+
+# 在你自己 fork 的仓库里运行：push 到 3.0 分支或手动触发
+on:
+  push:
+    branches: [ "3.0" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 计算小写镜像名
+        id: img
+        run: echo "name=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+          cache: maven
+
+      - name: Maven 打包
+        run: mvn -B -DskipTests package
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ steps.img.outputs.name }}:music-only
+            ghcr.io/${{ steps.img.outputs.name }}:music-only-${{ github.sha }}
+          build-args: |
+            JAR_FILE=target/simple_sq_music_plus.jar
+          provenance: false
+
+      # ---------------------------------------------------------------
+      # 可选：同时推一份到阿里云镜像仓库（国内拉取更快）
+      # 用法：仓库 Settings → Secrets 里加 ALIYUN_REGISTRY / ALIYUN_USER / ALIYUN_PASSWORD
+      # 然后把下面这段的注释去掉，并把 namespace 改成你自己的。
+      # ---------------------------------------------------------------
+      # - name: 登录阿里云 ACR
+      #   uses: docker/login-action@v3
+      #   with:
+      #     registry: ${{ secrets.ALIYUN_REGISTRY }}
+      #     username: ${{ secrets.ALIYUN_USER }}
+      #     password: ${{ secrets.ALIYUN_PASSWORD }}
+      #
+      # - name: 追加推送阿里云
+      #   uses: docker/build-push-action@v6
+      #   with:
+      #     context: .
+      #     file: ./Dockerfile
+      #     push: true
+      #     tags: ${{ secrets.ALIYUN_REGISTRY }}/your-namespace/simple_sq_music_plus:music-only
+      #     build-args: |
+      #       JAR_FILE=target/simple_sq_music_plus.jar
+      #     provenance: false
